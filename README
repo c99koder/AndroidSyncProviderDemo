@@ -1,0 +1,6 @@
+This project demonstrates how to create a contacts sync provider for Android.
+
+It implements a dummy login activity, and a sync provider that creates a single contact
+named "Elmer Fudd" and updates his social status on sync.
+
+For further discussion, see http://www.c99.org/2010/01/23/writing-an-android-sync-provider-part-1/
