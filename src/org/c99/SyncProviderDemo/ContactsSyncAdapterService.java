@@ -15,6 +15,7 @@
  ******************************************************************************/
 package org.c99.SyncProviderDemo;
 
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 
@@ -30,7 +31,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SyncResult;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.Bitmap.CompressFormat;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.provider.BaseColumns;
@@ -47,6 +52,8 @@ public class ContactsSyncAdapterService extends Service {
 	private static final String TAG = "ContactsSyncAdapterService";
 	private static SyncAdapterImpl sSyncAdapter = null;
 	private static ContentResolver mContentResolver = null;
+	private static String UsernameColumn = ContactsContract.RawContacts.SYNC1;
+	private static String PhotoTimestampColumn = ContactsContract.RawContacts.SYNC2;
 
 	public ContactsSyncAdapterService() {
 		super();
@@ -133,10 +140,14 @@ public class ContactsSyncAdapterService extends Service {
 						builder.withValue(ContactsContract.StatusUpdates.STATUS_TIMESTAMP, System.currentTimeMillis());
 						operationList.add(builder.build());
 
-						builder = ContentProviderOperation.newUpdate(ContactsContract.Data.CONTENT_URI);
-						builder.withSelection(BaseColumns._ID + " = '" + c.getLong(1) + "'", null);
-						builder.withValue(ContactsContract.Data.DATA3, status);
-						operationList.add(builder.build());
+						//Only change the text of our custom entry to the status message pre-Honeycomb, as the newer contacts app shows
+						//statuses elsewhere
+						if(Integer.decode(Build.VERSION.SDK) < 11) {
+							builder = ContentProviderOperation.newUpdate(ContactsContract.Data.CONTENT_URI);
+							builder.withSelection(BaseColumns._ID + " = '" + c.getLong(1) + "'", null);
+							builder.withValue(ContactsContract.Data.DATA3, status);
+							operationList.add(builder.build());
+						}
 					}
 				}
 			}
@@ -144,19 +155,52 @@ public class ContactsSyncAdapterService extends Service {
 			c.close();
 		}
 	}
+	
+	private static void updateContactPhoto(ArrayList<ContentProviderOperation> operationList, long rawContactId, byte[] photo) {
+		ContentProviderOperation.Builder builder = ContentProviderOperation.newDelete(ContactsContract.Data.CONTENT_URI);
+		builder.withSelection(ContactsContract.Data.RAW_CONTACT_ID + " = '" + rawContactId 
+				+ "' AND " + ContactsContract.Data.MIMETYPE + " = '" + ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE + "'", null);
+		operationList.add(builder.build());
+
+		try {
+			if(photo != null) {
+				builder = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI);
+				builder.withValue(ContactsContract.CommonDataKinds.Photo.RAW_CONTACT_ID, rawContactId);
+				builder.withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE);
+				builder.withValue(ContactsContract.CommonDataKinds.Photo.PHOTO, photo);
+				operationList.add(builder.build());
+
+				builder = ContentProviderOperation.newUpdate(ContactsContract.RawContacts.CONTENT_URI);
+				builder.withSelection(ContactsContract.RawContacts.CONTACT_ID + " = '" + rawContactId + "'", null);
+				builder.withValue(PhotoTimestampColumn, String.valueOf(System.currentTimeMillis()));
+				operationList.add(builder.build());
+			}
+		} catch (Exception e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+	}
+	
+	private static class SyncEntry {
+		public Long raw_id = 0L;
+		public Long photo_timestamp = null;
+	}
 
 	private static void performSync(Context context, Account account, Bundle extras, String authority, ContentProviderClient provider, SyncResult syncResult)
 			throws OperationCanceledException {
-		HashMap<String, Long> localContacts = new HashMap<String, Long>();
+		HashMap<String, SyncEntry> localContacts = new HashMap<String, SyncEntry>();
 		mContentResolver = context.getContentResolver();
 		Log.i(TAG, "performSync: " + account.toString());
 
 		// Load the local contacts
 		Uri rawContactUri = RawContacts.CONTENT_URI.buildUpon().appendQueryParameter(RawContacts.ACCOUNT_NAME, account.name).appendQueryParameter(
 				RawContacts.ACCOUNT_TYPE, account.type).build();
-		Cursor c1 = mContentResolver.query(rawContactUri, new String[] { BaseColumns._ID, RawContacts.SYNC1 }, null, null, null);
+		Cursor c1 = mContentResolver.query(rawContactUri, new String[] { BaseColumns._ID, UsernameColumn, PhotoTimestampColumn }, null, null, null);
 		while (c1.moveToNext()) {
-			localContacts.put(c1.getString(1), c1.getLong(0));
+			SyncEntry entry = new SyncEntry();
+			entry.raw_id = c1.getLong(c1.getColumnIndex(BaseColumns._ID));
+			entry.photo_timestamp = c1.getLong(c1.getColumnIndex(PhotoTimestampColumn));
+			localContacts.put(c1.getString(1), entry);
 		}
 
 		ArrayList<ContentProviderOperation> operationList = new ArrayList<ContentProviderOperation>();
@@ -166,7 +210,14 @@ public class ContactsSyncAdapterService extends Service {
 			if (localContacts.get("efudd") == null) {
 				addContact(account, "Elmer Fudd", "efudd");
 			} else {
-				updateContactStatus(operationList, localContacts.get("efudd"), "hunting wabbits");
+				if (localContacts.get("efudd").photo_timestamp == null || System.currentTimeMillis() > (localContacts.get("efudd").photo_timestamp + 604800000L)) {
+					//You would probably download an image file and just pass the bytes, but this sample doesn't use network so we'll decode and re-compress the icon resource to get the bytes
+					ByteArrayOutputStream stream = new ByteArrayOutputStream();
+					Bitmap icon = BitmapFactory.decodeResource(context.getResources(), R.drawable.icon);
+					icon.compress(CompressFormat.PNG, 0, stream);
+					updateContactPhoto(operationList, localContacts.get("efudd").raw_id, stream.toByteArray());
+				}
+				updateContactStatus(operationList, localContacts.get("efudd").raw_id, "hunting wabbits");
 			}
 			if (operationList.size() > 0)
 				mContentResolver.applyBatch(ContactsContract.AUTHORITY, operationList);
